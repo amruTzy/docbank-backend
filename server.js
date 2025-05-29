@@ -37,6 +37,15 @@ app.use((req, res, next) => {
   next();
 });
 
+// WebSocket upgrade handler
+app.get('/ws', (req, res) => {
+  res.set({
+    'Upgrade': 'websocket',
+    'Connection': 'Upgrade'
+  });
+  res.status(400).send('WebSocket endpoint hanya tersedia untuk koneksi WebSocket');
+});
+
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/surat', suratRoutes);
@@ -63,7 +72,9 @@ app.use((err, req, res, next) => {
   });
 });
 
+// Inisialisasi WebSocket dengan server
 initWebSocket(server);
+console.log('✅ WebSocket server running on ws://localhost:' + (process.env.PORT || 3000) + '/ws');
 
 // Start server
 const PORT = process.env.PORT || 3000;

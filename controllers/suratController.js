@@ -4,6 +4,8 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const { createNotification } = require('./notificationController');
+const { broadcastActivity } = require('../websocket');
+const { generateLogActivity } = require('../utils/logUtils');
 
 // Pastikan direktori uploads/surat ada
 const uploadDir = path.join(__dirname, '../uploads');
@@ -454,6 +456,27 @@ const simpanSuratMasukUser = async (req, res) => {
         }
       }
 
+      // Kirim notifikasi real-time melalui WebSocket
+      broadcastActivity({
+        type: 'new_document',
+        document_id: suratId,
+        document_type: 'masuk',
+        created_by: req.user.username,
+        created_at: new Date(),
+        targetRole: 'sekretaris' // Kirim ke semua sekretaris
+      });
+      
+      // Perbarui statistik untuk admin dan sekretaris
+      broadcastActivity({
+        type: 'statistic_update',
+        targetRole: 'admin'
+      });
+      
+      broadcastActivity({
+        type: 'statistic_update',
+        targetRole: 'sekretaris'
+      });
+
       console.log('Semua proses selesai, mengirim response sukses');
       res.status(201).json({
         message: 'Surat masuk berhasil disimpan dan menunggu persetujuan',
@@ -898,6 +921,95 @@ const getUserSuratStatus = async (req, res) => {
   }
 };
 
+// Ubah dari exports.updateStatus menjadi definisi fungsi biasa
+function updateStatus(req, res) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const suratId = req.params.id;
+      const { status, catatan } = req.body;
+      const userId = req.user.id;
+      const userRole = req.user.role;
+      
+      // Update status surat
+      const updateQuery = `
+        UPDATE surat 
+        SET status = ?, catatan = ?, updated_at = NOW()
+        WHERE id = ?
+      `;
+      
+      await db.query(updateQuery, [status, catatan || null, suratId]);
+      
+      // Dapatkan info surat untuk log dan notifikasi
+      const [suratInfo] = await db.query(
+        'SELECT s.*, u.username FROM surat s JOIN users u ON s.user_id = u.id WHERE s.id = ?', 
+        [suratId]
+      );
+      
+      if (suratInfo && suratInfo.length > 0) {
+        const surat = suratInfo[0];
+        
+        // Kirim update melalui WebSocket
+        broadcastActivity({
+          type: 'status_update',
+          action: 'update_status',
+          document_id: suratId,
+          status: status,
+          updated_by: req.user.username,
+          updated_at: new Date(),
+          targetUserId: surat.user_id, // Kirim ke pengguna yang memiliki dokumen
+          targetRole: 'user' // Dan ke semua user
+        });
+        
+        // Kirim update statistik untuk sekretaris dan admin
+        broadcastActivity({
+          type: 'statistic_update',
+          targetRole: 'sekretaris' 
+        });
+        
+        broadcastActivity({
+          type: 'statistic_update',
+          targetRole: 'admin'
+        });
+        
+        // Kirim update statistik untuk pemilik surat
+        broadcastActivity({
+          type: 'statistic_update',
+          targetUserId: surat.user_id
+        });
+        
+        // Generate log activity
+        await generateLogActivity({
+          userId,
+          activity: `${userRole} ${req.user.username} mengubah status surat "${surat.judul}" menjadi ${status}`,
+          module: 'surat',
+          endpoint: req.originalUrl,
+          method: req.method,
+          status: 'success',
+          data: JSON.stringify({ suratId, status })
+        });
+      }
+      
+      res.status(200).json({
+        success: true,
+        message: `Status surat berhasil diubah menjadi ${status}`,
+        data: { id: suratId, status }
+      });
+      
+      resolve();
+    } catch (error) {
+      console.error('Error updating surat status:', error);
+      
+      res.status(500).json({
+        success: false,
+        message: 'Terjadi kesalahan saat mengubah status surat',
+        error: error.message
+      });
+      
+      reject(error);
+    }
+  });
+}
+
 module.exports = {
   simpanSuratMasuk,
   simpanSuratKeluar,
@@ -912,4 +1024,5 @@ module.exports = {
   getSuratStatus,
   getUserSuratMasuk,
   getUserSuratStatus,
+  updateStatus,
 };
