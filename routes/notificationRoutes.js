@@ -15,6 +15,12 @@ router.put('/:id/read', verifyToken, notificationController.markAsRead);
 // Menandai semua notifikasi sebagai telah dibaca
 router.put('/read-all', verifyToken, notificationController.markAllAsRead);
 
+// Menghapus semua notifikasi
+router.delete('/delete-all', verifyToken, notificationController.deleteAllNotifications);
+
+// Menghapus semua notifikasi (alternative route)
+router.delete('/all', verifyToken, notificationController.deleteAllNotifications);
+
 // Menghapus notifikasi
 router.delete('/:id', verifyToken, notificationController.deleteNotification);
 

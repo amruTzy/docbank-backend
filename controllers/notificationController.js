@@ -283,5 +283,36 @@ exports.deleteNotification = async (req, res) => {
   }
 };
 
+// Menghapus semua notifikasi untuk user yang login
+exports.deleteAllNotifications = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    console.log(`Mencoba menghapus semua notifikasi untuk user ID ${userId}`);
+    
+    // Hapus semua notifikasi
+    const result = await pool.query(
+      `DELETE FROM notifications
+      WHERE user_id = $1
+      RETURNING id`,
+      [userId]
+    );
+    
+    console.log(`✅ ${result.rowCount} notifikasi berhasil dihapus oleh user ID ${userId}`);
+    
+    res.status(200).json({
+      success: true,
+      message: 'Semua notifikasi berhasil dihapus',
+      count: result.rowCount
+    });
+  } catch (err) {
+    console.error(`Error deleting all notifications for user ${req.user.id}:`, err);
+    res.status(500).json({
+      success: false,
+      message: 'Terjadi kesalahan saat menghapus semua notifikasi',
+    });
+  }
+};
+
 // Export createNotification untuk digunakan di controller lain
 exports.createNotification = createNotification; 
