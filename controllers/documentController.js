@@ -9,6 +9,8 @@ const { encryptFile, decryptFile } = require('../utils/encryption');
 
 const ENCRYPTION_KEY = Buffer.from('12345678901234567890123456789012'); // 32 byte key
 const IV_LENGTH = 16;
+const supabase = require('../config/supabase');
+const fs = require('fs');
 
 // function encrypt(buffer) {
 //   const iv = crypto.randomBytes(IV_LENGTH);
@@ -31,13 +33,29 @@ exports.uploadDocument = async (req, res) => {
 
   if (!file) return res.status(400).json({ error: 'File tidak ditemukan' });
 
-  const originalPath = file.path; // uploads/nama.pdf
-  const encryptedPath = file.path + '.enc'; // uploads/nama.pdf.enc
+  const originalPath = file.path;
+  const encryptedPath = file.path + '.enc';
 
   try {
-    await encryptFile(originalPath, encryptedPath); // Enkripsi file
-    fs.unlinkSync(originalPath); // Hapus file asli
+    await encryptFile(originalPath, encryptedPath);
+    fs.unlinkSync(originalPath); // hapus file asli
 
+    // Upload ke Supabase Storage
+    const fileBuffer = fs.readFileSync(encryptedPath);
+    const supabasePath = `user_${userId}/${path.basename(encryptedPath)}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('documents') // nama bucket
+      .upload(supabasePath, fileBuffer, {
+        contentType: file.mimetype,
+        upsert: true,
+      });
+
+    if (uploadError) throw uploadError;
+
+    fs.unlinkSync(encryptedPath); // hapus file lokal terenkripsi
+
+    // Simpan metadata di DB
     const result = await pool.query(
       `INSERT INTO documents (user_id, name, file_path, mime_type, size, folder_id, description, uploaded_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
@@ -45,18 +63,17 @@ exports.uploadDocument = async (req, res) => {
       [
         userId,
         name || file.originalname,
-        path.basename(encryptedPath),
+        supabasePath, // path di storage, bukan di folder lokal
         file.mimetype,
         file.size,
         folder_id || null,
-        description || ''
+        description || '',
       ]
     );
 
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    if (fs.existsSync(encryptedPath)) fs.unlinkSync(encryptedPath);
-    if (fs.existsSync(originalPath)) fs.unlinkSync(originalPath);
+    console.error('Upload error:', err);
     res.status(500).json({ error: err.message });
   }
 };
@@ -147,57 +164,14 @@ exports.renameDocument = async (req, res) => {
 
 // Fungsi backend yang sudah diperbaiki
 exports.viewDocument = async (req, res) => {
-  try {
-    console.log('viewDocument dipanggil dengan params:', req.params, 'dan query:', req.query);
-    
-    // Variabel untuk menyimpan ID dan role pengguna
-    let userId, role;
-    
-    // Cek token di header atau di parameter URL
-    if (req.query.token) {
-      // Jika token diberikan sebagai parameter URL
-      try {
-        const tokenFromUrl = req.query.token;
-        console.log('Token ditemukan di URL parameter:', tokenFromUrl.substring(0, 20) + '...');
-        
-        if (!process.env.JWT_SECRET) {
-          console.error('JWT_SECRET tidak ditemukan di environment variables');
-          return res.status(500).json({ message: 'Server error: Missing JWT configuration' });
-        }
-        
-        // Coba verifikasi token
-        try {
-          const decoded = jwt.verify(tokenFromUrl, process.env.JWT_SECRET);
-          userId = decoded.id;
-          role = decoded.role;
-          console.log('Autentikasi via URL parameter token berhasil untuk user:', userId, 'dengan role:', role);
-        } catch (tokenVerifyError) {
-          console.error('Gagal verifikasi token:', tokenVerifyError.message);
-          return res.status(401).json({ message: 'Token tidak valid atau kadaluwarsa' });
-        }
-      } catch (tokenError) {
-        console.error('Error memproses token URL:', tokenError);
-        return res.status(401).json({ message: 'Token tidak valid atau kadaluwarsa' });
-      }
-    } else if (req.user) {
-      // Jika menggunakan token dari header Authorization (cara lama)
-      userId = req.user.id;
-      role = req.user.role;
-      console.log('Autentikasi via header token berhasil untuk user:', userId, 'dengan role:', role);
-    } else {
-      // Tidak ada autentikasi yang valid
-      console.error('Tidak ada token ditemukan di request');
-      return res.status(401).json({ message: 'Token tidak ditemukan' });
-    }
-    
-    const documentId = req.params.id;
-    // Cek apakah mode download atau inline view
-    const downloadMode = req.query.download === 'true';
-    const inlineMode = req.query.inline === 'true';
-    console.log('Mencoba mengakses dokumen ID:', documentId, 'dengan mode download:', downloadMode, 'mode inline:', inlineMode);
+  const documentId = req.params.id;
+  const token = req.query.token;
 
-    // Jika role adalah admin atau sekretaris, izinkan akses ke semua dokumen
-    // Jika role lainnya, hanya izinkan akses ke dokumen milik sendiri
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const userId = decoded.id;
+    const role = decoded.role;
+
     const query = (role === 'admin' || role === 'sekretaris') 
       ? 'SELECT * FROM documents WHERE id = $1'
       : 'SELECT * FROM documents WHERE id = $1 AND user_id = $2';
@@ -205,107 +179,24 @@ exports.viewDocument = async (req, res) => {
     const params = (role === 'admin' || role === 'sekretaris') 
       ? [documentId]
       : [documentId, userId];
-    
-    console.log('Menjalankan query:', query, 'dengan params:', params);
-    const result = await pool.query(query, params);
 
-    if (result.rows.length === 0) {
-      console.error('Dokumen tidak ditemukan untuk ID:', documentId);
+    const result = await pool.query(query, params);
+    if (result.rows.length === 0)
       return res.status(404).json({ message: 'Dokumen tidak ditemukan' });
-    }
 
     const document = result.rows[0];
-    // Ambil informasi penting dari database
-    const fileName = document.file_path;
-    // Gunakan nama file dari parameter URL jika ada, jika tidak gunakan dari database
-    const originalName = req.query.filename || document.name;
-    let mimeType = document.mime_type; // MIME type dokumen
-    
-    // Periksa ekstensi file untuk menentukan MIME type yang benar
-    const fileNameLower = originalName.toLowerCase();
-    // Deteksi PDF
-    if (fileNameLower.endsWith('.pdf') && mimeType === 'application/octet-stream') {
-      console.log('Mengganti MIME type dari application/octet-stream ke application/pdf untuk file PDF');
-      mimeType = 'application/pdf';
-    } 
-    // Deteksi gambar
-    else if (
-      (fileNameLower.endsWith('.jpg') || fileNameLower.endsWith('.jpeg')) && 
-      mimeType === 'application/octet-stream'
-    ) {
-      mimeType = 'image/jpeg';
-    }
-    else if (fileNameLower.endsWith('.png') && mimeType === 'application/octet-stream') {
-      mimeType = 'image/png';
-    }
-    else if (fileNameLower.endsWith('.gif') && mimeType === 'application/octet-stream') {
-      mimeType = 'image/gif';
-    }
-    
-    console.log('Dokumen ditemukan:', fileName, 'dengan nama:', originalName, 'tipe:', mimeType);
-    
-    // Buat path lengkap ke file terenkripsi
-    const encryptedFile = path.join(__dirname, '../uploads', fileName);
-    // Buat path untuk file yang akan didekripsi
-    const decryptedFile = path.join(__dirname, '../uploads', fileName.replace('.enc', '.dec'));
+    const { data, error } = await supabase.storage
+      .from('documents')
+      .createSignedUrl(document.file_path, 60 * 60); // berlaku 1 jam
 
-    if (!fs.existsSync(encryptedFile)) {
-      console.error('File fisik tidak ditemukan di:', encryptedFile);
-      return res.status(404).json({ message: 'File tidak ditemukan' });
-    }
-
-    console.log('Mendekripsi file dari', encryptedFile, 'ke', decryptedFile);
-    await decryptFile(encryptedFile, decryptedFile); // Dekripsi ke file .dec
-
-    // Menentukan disposisi berdasarkan parameter request dan tipe mime
-    let disposition;
-    
-    if (downloadMode) {
-      // Jika parameter download=true, paksa download
-      disposition = 'attachment';
-    } else if (inlineMode && shouldDisplayInBrowser(mimeType)) {
-      // Jika parameter inline=true dan tipe file bisa ditampilkan di browser, paksa inline
-      disposition = 'inline';
-    } else {
-      // Default behavior berdasarkan tipe mime
-      disposition = shouldDisplayInBrowser(mimeType) ? 'inline' : 'attachment';
-    }
-    
-    console.log('Mengatur disposition:', disposition, 'untuk mimetype:', mimeType);
-    
-    // Set header yang sesuai
-    res.setHeader('Content-Type', mimeType);
-    res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(originalName)}"`);
-    
-    // Tambahkan header untuk mencegah caching (penting untuk keamanan)
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    
-    console.log('Mulai streaming file ke client');
-    // Kirim file terdekripsi
-    fs.createReadStream(decryptedFile).pipe(res)
-      .on('finish', () => {
-        // Hapus file terdekripsi setelah selesai dikirim
-        if (fs.existsSync(decryptedFile)) {
-          fs.unlinkSync(decryptedFile);
-          console.log('File terdekripsi berhasil dihapus setelah streaming');
-        }
-      })
-      .on('error', (err) => {
-        console.error('Error streaming file:', err);
-        if (!res.headersSent) {
-          return res.status(500).json({ message: 'Error sending file' });
-        }
-      });
-
+    if (error) throw error;
+    return res.redirect(data.signedUrl);
   } catch (err) {
-    console.error('Error in viewDocument:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ message: err.message });
-    }
+    console.error(err);
+    res.status(500).json({ message: err.message });
   }
 };
+  
 
 // Fungsi untuk menentukan apakah file harus ditampilkan di browser
 function shouldDisplayInBrowser(mimeType) {
