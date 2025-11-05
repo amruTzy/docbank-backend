@@ -10,7 +10,6 @@ const { encryptFile, decryptFile } = require('../utils/encryption');
 const ENCRYPTION_KEY = Buffer.from('12345678901234567890123456789012'); // 32 byte key
 const IV_LENGTH = 16;
 const supabase = require('../config/supabase');
-const fs = require('fs');
 
 // function encrypt(buffer) {
 //   const iv = crypto.randomBytes(IV_LENGTH);
