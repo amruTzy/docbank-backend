@@ -171,28 +171,59 @@ exports.viewDocument = async (req, res) => {
     const userId = decoded.id;
     const role = decoded.role;
 
-    const query = (role === 'admin' || role === 'sekretaris') 
-      ? 'SELECT * FROM documents WHERE id = $1'
-      : 'SELECT * FROM documents WHERE id = $1 AND user_id = $2';
-    
-    const params = (role === 'admin' || role === 'sekretaris') 
-      ? [documentId]
-      : [documentId, userId];
+    // === Ambil info dokumen dari DB ===
+    const query =
+      role === "admin" || role === "sekretaris"
+        ? "SELECT * FROM documents WHERE id = $1"
+        : "SELECT * FROM documents WHERE id = $1 AND user_id = $2";
+
+    const params =
+      role === "admin" || role === "sekretaris"
+        ? [documentId]
+        : [documentId, userId];
 
     const result = await pool.query(query, params);
     if (result.rows.length === 0)
-      return res.status(404).json({ message: 'Dokumen tidak ditemukan' });
+      return res.status(404).json({ message: "Dokumen tidak ditemukan" });
 
     const document = result.rows[0];
+    const filePath = document.file_path;
+
+    // === Unduh file terenkripsi dari Supabase ===
     const { data, error } = await supabase.storage
-      .from('documents')
-      .createSignedUrl(document.file_path, 60 * 60); // berlaku 1 jam
+      .from("documents")
+      .download(filePath);
 
     if (error) throw error;
-    return res.redirect(data.signedUrl);
+
+    // Simpan file terenkripsi sementara di server
+    const tempEncPath = path.join(__dirname, "../uploads/temp.enc");
+    const tempDecPath = path.join(__dirname, "../uploads/temp.pdf");
+
+    fs.writeFileSync(tempEncPath, Buffer.from(await data.arrayBuffer()));
+
+    // === Dekripsi ke file sementara ===
+    await decryptFile(tempEncPath, tempDecPath);
+
+    // === Kirim hasil dekripsi ke browser ===
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="${encodeURIComponent(document.name)}"`
+    );
+
+    const stream = fs.createReadStream(tempDecPath);
+    stream.pipe(res);
+
+    stream.on("close", () => {
+      // Hapus file sementara setelah dikirim
+      fs.unlinkSync(tempEncPath);
+      fs.unlinkSync(tempDecPath);
+    });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: err.message });
+    console.error("Error di viewDocument:", err);
+    if (!res.headersSent)
+      res.status(500).json({ message: "Gagal memproses dokumen" });
   }
 };
   
